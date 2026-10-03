@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         Always visible
-// @version      5
+// @version      6
 // @match        *://*/*
 // @run-at       document-start
 // @grant        none
@@ -49,6 +49,11 @@ const startHeartbeat = () => {
 
 const disguise = (win, fake, real) => {
   Object.setPrototypeOf(fake, win.Function.prototype);
+  // Match the native's arity and name so Function.prototype.toString isn't the only tell.
+  try {
+    Object.defineProperty(fake, 'length', { value: real.length, configurable: true });
+    Object.defineProperty(fake, 'name', { value: real.name, configurable: true });
+  } catch {}
   natives.set(fake, real);
   return fake;
 };
@@ -75,10 +80,12 @@ const patch = (win) => {
   fnProto.toString = disguise(win, toString, nativeToString);
 
   const docProto = win.Document.prototype;
-  replaceGetter(win, docProto, 'hidden', () => false);
-  replaceGetter(win, docProto, 'visibilityState', () => 'visible');
+  // Call the native getter for its receiver check (then ignore the real value) so these throw on a
+  // non-Document `this` exactly as the natives do.
+  replaceGetter(win, docProto, 'hidden', (self, get) => { get.call(self); return false; });
+  replaceGetter(win, docProto, 'visibilityState', (self, get) => { get.call(self); return 'visible'; });
   const nativeHasFocus = docProto.hasFocus;
-  const { hasFocus } = { hasFocus() { return true; } };
+  const { hasFocus } = { hasFocus() { nativeHasFocus.call(this); return true; } };
   docProto.hasFocus = disguise(win, hasFocus, nativeHasFocus);
 
   for (const El of [win.HTMLIFrameElement, win.HTMLFrameElement, win.HTMLObjectElement]) {
@@ -113,46 +120,61 @@ const patch = (win) => {
   // Run rAF and timers off the background clock so a hidden tab shows no frame/timer pause.
   startHeartbeat();
   const now = () => win.performance.now();
+  // Native Window methods throw on a wrong `this`; mirror that. `this` null/undefined is allowed
+  // (bare `const s = setTimeout; s(fn)` keeps working), any other non-Window object throws.
+  const illegal = (self) => { if (self != null && self.window !== self) throw new win.TypeError('Illegal invocation'); };
+  // A swallowed callback error would never reach window 'error'; rethrow it on a fresh task so it
+  // surfaces there as a native callback's would, without killing the dispatch loop.
+  const rethrow = (e) => nativeSetTimeout(() => { throw e; });
 
   const rafCbs = new Map();
   let rafSeq = 0;
-  const raf = { requestAnimationFrame(cb) { const id = ++rafSeq; rafCbs.set(id, cb); return id; } }.requestAnimationFrame;
-  const caf = { cancelAnimationFrame(id) { rafCbs.delete(id); } }.cancelAnimationFrame;
+  const raf = { requestAnimationFrame(cb) { illegal(this); const id = ++rafSeq; rafCbs.set(id, cb); return id; } }.requestAnimationFrame;
+  const caf = { cancelAnimationFrame(id) { illegal(this); rafCbs.delete(id); } }.cancelAnimationFrame;
   win.requestAnimationFrame = disguise(win, raf, win.requestAnimationFrame);
   win.cancelAnimationFrame = disguise(win, caf, win.cancelAnimationFrame);
   ticks.add(() => {
     if (!rafCbs.size) return;
     const t = now(), due = [...rafCbs.values()];
     rafCbs.clear();
-    for (const cb of due) { try { cb(t); } catch {} }
+    for (const cb of due) { try { cb(t); } catch (e) { rethrow(e); } }
   });
 
-  // ponytail: resolution is now the ~16ms worker tick, so setTimeout(fn,0)/short delays fire a
-  // little later and batch per tick. Fine for throttle probes and animation; a page needing
-  // sub-frame timer precision would notice.
+  // ponytail: worker-driven dispatch has two tells with no cheap fix. (1) Resolution is the ~16ms
+  // worker tick, so setTimeout(fn,0)/short delays fire later and batch per tick. (2) Callbacks run
+  // from the worker's onmessage, so their stack carries our dispatcher frames, unlike a native
+  // callback's bare frame. Both are inherent to driving timers off a Worker; only a native timer
+  // (which the browser throttles when hidden, defeating the point) avoids them.
   const timers = new Map();
   let timerSeq = 0;
   const addTimer = (cb, delay, args, repeat) => {
+    // A string handler runs in global scope, like a native string timer (CSP can block both).
+    if (typeof cb === 'string') { const code = cb; cb = () => win.eval(code); }
     if (typeof cb !== 'function') return 0;
     const d = Math.max(+delay || 0, 0), id = ++timerSeq;
     timers.set(id, { cb, args, repeat, d, next: now() + d });
     return id;
   };
-  const setT = { setTimeout(cb, delay, ...a) { return addTimer(cb, delay, a, false); } }.setTimeout;
-  const setI = { setInterval(cb, delay, ...a) { return addTimer(cb, delay, a, true); } }.setInterval;
-  const clrT = { clearTimeout(id) { timers.delete(id); } }.clearTimeout;
-  const clrI = { clearInterval(id) { timers.delete(id); } }.clearInterval;
+  const setT = { setTimeout(cb, delay, ...a) { illegal(this); return addTimer(cb, delay, a, false); } }.setTimeout;
+  const setI = { setInterval(cb, delay, ...a) { illegal(this); return addTimer(cb, delay, a, true); } }.setInterval;
+  const clrT = { clearTimeout(id) { illegal(this); timers.delete(id); } }.clearTimeout;
+  const clrI = { clearInterval(id) { illegal(this); timers.delete(id); } }.clearInterval;
   win.setTimeout = disguise(win, setT, win.setTimeout);
   win.setInterval = disguise(win, setI, win.setInterval);
   win.clearTimeout = disguise(win, clrT, win.clearTimeout);
   win.clearInterval = disguise(win, clrI, win.clearInterval);
   ticks.add(() => {
     const t = now();
-    for (const [id, x] of timers) {
-      if (t >= x.next) {
-        if (x.repeat) x.next = t + x.d; else timers.delete(id);
-        try { x.cb(...x.args); } catch {}
-      }
+    // Fire everything due this tick in scheduled order (earliest, then oldest), so a shorter delay
+    // beats a longer one queued earlier. Interval repeats advance from the target time, not the
+    // actual fire time, so they don't drift later by up to a tick each round.
+    const due = [];
+    for (const [id, x] of timers) if (t >= x.next) due.push([id, x]);
+    due.sort((a, b) => a[1].next - b[1].next || a[0] - b[0]);
+    for (const [id, x] of due) {
+      if (!timers.has(id)) continue; // a callback earlier this tick cleared it
+      if (x.repeat) { x.next += x.d; if (x.next <= t) x.next = t + x.d; } else timers.delete(id);
+      try { x.cb(...x.args); } catch (e) { rethrow(e); }
     }
   });
 

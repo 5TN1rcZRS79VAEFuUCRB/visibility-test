@@ -61,6 +61,13 @@
   document.body.append(holder);
   holder.innerHTML = '<iframe style="display:none"></iframe>';
   const realm3 = window[window.length - 1];
+  // A fourth iframe with srcdoc: patched at insertion, then its initial about:blank navigates to a
+  // new document. If the browser gives that document a fresh realm, the patches are gone. Read it
+  // via its window index, again so the contentWindow getter can't re-patch it.
+  const sdIndex = window.length;
+  const sd = Object.assign(document.createElement('iframe'), { style: 'display:none', srcdoc: '<p>srcdoc' });
+  document.body.append(sd);
+  const realm4 = () => window[sdIndex];
   const iframeHidden = () => Object.getOwnPropertyDescriptor(realm.Document.prototype, 'hidden').get.call(document);
   const iframeFocus = () => realm.Document.prototype.hasFocus.call(document);
 
@@ -93,7 +100,59 @@
     tamper[name + ' not native'] = !native(f);
     tamper[name + ' from another realm'] = Object.getPrototypeOf(f) !== Function.prototype;
   }
+  // Fakes must match the WebIDL arity of the natives they replace.
+  for (const [obj, name, len] of [
+    [window, 'setTimeout', 1], [window, 'setInterval', 1], [window, 'clearTimeout', 0], [window, 'clearInterval', 0],
+    [window, 'requestAnimationFrame', 1], [window, 'cancelAnimationFrame', 1], [Document.prototype, 'hasFocus', 0],
+    [Node.prototype, 'appendChild', 1], [Node.prototype, 'insertBefore', 2], [Node.prototype, 'replaceChild', 2],
+    [Element.prototype, 'append', 0], [Element.prototype, 'insertAdjacentElement', 2],
+  ]) tamper[name + '.length is ' + obj[name].length + ', native is ' + len] = obj[name].length !== len;
+  // Natives throw on a wrong `this`; a fake that ignores its receiver doesn't.
+  const throwsOn = (f, ...args) => { try { f.call({}, ...args); return false; } catch { return true; } };
+  Object.assign(tamper, {
+    'hidden getter accepts a non-Document this': !throwsOn(protoGet),
+    'visibilityState getter accepts a non-Document this': !throwsOn(vgetter),
+    'hasFocus accepts a non-Document this': !throwsOn(Document.prototype.hasFocus),
+    'setTimeout accepts a non-Window this': !throwsOn(setTimeout, () => {}),
+    'requestAnimationFrame accepts a non-Window this': !throwsOn(requestAnimationFrame, () => {}),
+  });
   for (const [name, found] of Object.entries(tamper)) if (found) log('tampering visible: ' + name);
+  sd.addEventListener('load', () => {
+    if (!/\[native code\]/.test(realm4().Function.prototype.toString.call(protoGet))) log('tampering visible: hidden getter not native (checked via srcdoc frame)');
+  });
+
+  // A native timer/rAF callback has only its own frame on the stack; a JS-driven fake leaves its
+  // dispatcher frames under it. (Firefox async-stack lines contain '*' and are skipped.)
+  const callerFrames = () => new Error().stack.split('\n').filter(l => /:\d+:\d+/.test(l) && !l.includes('*')).length - 1;
+  setTimeout(() => { const n = callerFrames(); if (n > 1) log('setTimeout callback has ' + n + ' frames on its stack'); }, 0);
+  requestAnimationFrame(() => { const n = callerFrames(); if (n > 1) log('requestAnimationFrame callback has ' + n + ' frames on its stack'); });
+
+  // Timing fingerprints, measured while focused. setTimeout(fn, 0) from a fresh task fires within
+  // ~1ms natively; a tick-driven fake averages half a tick. Native setInterval keeps its schedule;
+  // a fake that reschedules from fire time drifts.
+  {
+    const ch = new MessageChannel();
+    let n = 0, sum = 0;
+    ch.port1.onmessage = () => {
+      const t = performance.now();
+      setTimeout(() => {
+        sum += performance.now() - t;
+        if (++n < 10) ch.port2.postMessage(0);
+        else if (sum / n > 4) log('setTimeout(fn, 0) averages ' + (sum / n).toFixed(1) + 'ms');
+      }, 0);
+    };
+    ch.port2.postMessage(0);
+  }
+  {
+    let ticks = 0;
+    const t0 = performance.now();
+    const iv = setInterval(() => {
+      if (++ticks < 40) return;
+      clearInterval(iv);
+      const took = performance.now() - t0;
+      if (took > 2200) log('setInterval drift: 40 x 50ms ticks took ' + Math.round(took) + 'ms');
+    }, 50);
+  }
 
   // Background tabs pause animation frames and slow timers.
   let lastFrame = performance.now();
@@ -111,13 +170,32 @@
   }, 100);
 
   // Gaps: paths the script does not patch. These can fire while the script is active.
+  const hiddenLeak = (report, label, getWin) => {
+    let prev = false;
+    setInterval(() => {
+      const h = !!getWin()?.document.hidden;
+      if (h && !prev) report(label + ' reports hidden=true (real visibility leaked)');
+      prev = h;
+    }, 500);
+  };
   // The innerHTML-made frame keeps the real document.hidden, so it leaks true when backgrounded.
-  let prevIH = false;
-  setInterval(() => {
-    const h = realm3.document.hidden;
-    if (h && !prevIH) gap('innerHTML-created frame reports hidden=true (real visibility leaked)');
-    prevIH = h;
-  }, 500);
+  hiddenLeak(gap, 'innerHTML-created frame', () => realm3);
+  // The srcdoc frame was inserted via append, which the script claims to cover.
+  hiddenLeak(log, 'srcdoc frame', realm4);
+  // Losing window focus also blurs the focused element, and focus stays on it. The script only
+  // hides window-level blur. (Focus the input above, then switch away.)
+  document.addEventListener('focusout', (e) => setTimeout(() => {
+    if (document.activeElement === e.target) gap('focused element blurred but kept focus (window lost focus)');
+  }, 0));
+  // Chrome records each visibility change in the performance timeline.
+  if (PerformanceObserver.supportedEntryTypes?.includes('visibility-state')) {
+    new PerformanceObserver((list) => {
+      for (const e of list.getEntries()) if (e.name === 'hidden') gap('performance timeline has a visibility-state "hidden" entry');
+    }).observe({ type: 'visibility-state', buffered: true });
+  }
+  // Page Lifecycle: Chrome freezes long-backgrounded tabs and may discard them.
+  for (const ev of ['freeze', 'resume']) document.addEventListener(ev, () => gap('page lifecycle ' + ev + ' event'));
+  if (document.wasDiscarded) gap('document.wasDiscarded is true');
   // requestIdleCallback is unpatched, so the browser still throttles it when the tab is hidden.
   let lastIdle = performance.now();
   const idleProbe = () => {
@@ -177,6 +255,27 @@
     setTimeout(() => check('clearTimeout cancels', !tf), 80);
     let rf = false; const rid = requestAnimationFrame(() => { rf = true; }); cancelAnimationFrame(rid);
     setTimeout(() => check('cancelAnimationFrame cancels', !rf), 80);
+    setTimeout((x, y) => check('setTimeout passes extra arguments', x === 1 && y === 2), 0, 1, 2);
+    window.strTimerRan = false;
+    setTimeout('window.strTimerRan = true', 0);
+    setTimeout(() => check('setTimeout runs a string handler', window.strTimerRan), 80);
+    const order = [];
+    setTimeout(() => order.push('b'), 3);
+    setTimeout(() => order.push('a'), 1);
+    setTimeout(() => check('shorter setTimeout fires first', order.join('') === 'ab'), 80);
+    let ic = 0; const iid = setInterval(() => { if (++ic === 3) clearInterval(iid); }, 5);
+    setTimeout(() => check('setInterval repeats, clearInterval stops it', ic === 3), 150);
+    // An uncaught error in a callback must still reach window 'error', as it does natively.
+    const reaches = (name, schedule) => {
+      let seen = false;
+      const msg = 'probe error from ' + name;
+      const h = (e) => { if (e.message?.includes(msg)) { seen = true; e.preventDefault(); } };
+      window.addEventListener('error', h);
+      schedule(() => { throw new Error(msg); });
+      setTimeout(() => { window.removeEventListener('error', h); check(name + ' callback error reaches window error event', seen); }, 100);
+    };
+    reaches('setTimeout', (f) => setTimeout(f, 0));
+    reaches('requestAnimationFrame', (f) => requestAnimationFrame(f));
   };
   document.getElementById('run').onclick = runChecks;
   runChecks();
