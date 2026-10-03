@@ -237,6 +237,28 @@
   };
   if (window.requestIdleCallback) requestIdleCallback(idleProbe);
 
+  // requestVideoFrameCallback stalls in a hidden tab; the script should keep it firing. Gated behind
+  // ?rvfc=1 because it needs a playing <video> and a canvas draw loop, which don't belong on the
+  // manual page. Not gated on document.hidden (the script fakes that) so a broken rVFC fake is caught
+  // even while the hidden fake still works. run-tests.sh loads the page with ?rvfc=1 in its
+  // backgrounded pass.
+  if (new URLSearchParams(location.search).has('rvfc') && HTMLVideoElement.prototype.requestVideoFrameCallback) {
+    const cv = document.createElement('canvas'); cv.width = cv.height = 32;
+    const cx = cv.getContext('2d'); let hue = 0;
+    (function draw() { hue = (hue + 10) % 360; cx.fillStyle = 'hsl(' + hue + ',90%,50%)'; cx.fillRect(0, 0, 32, 32); requestAnimationFrame(draw); })();
+    const v = Object.assign(document.createElement('video'), { muted: true, autoplay: true, playsInline: true });
+    v.srcObject = cv.captureStream(30); v.style.display = 'none'; document.body.append(v);
+    v.play().catch(() => {});
+    let lastVF = performance.now();
+    v.requestVideoFrameCallback(function cb() { lastVF = performance.now(); v.requestVideoFrameCallback(cb); });
+    let vfStalled = false;
+    setInterval(() => {
+      const gap = performance.now() - lastVF;
+      if (gap > 1500 && !vfStalled) { log('requestVideoFrameCallback stalled ' + Math.round(gap) + 'ms'); vfStalled = true; }
+      else if (gap <= 1500) vfStalled = false;
+    }, 500);
+  }
+
   let lastStatus = '';
   setInterval(() => {
     const s = 'hidden=' + document.hidden + '  visibilityState=' + document.visibilityState + '  hasFocus=' + document.hasFocus()

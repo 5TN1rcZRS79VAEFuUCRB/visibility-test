@@ -9,7 +9,7 @@ A userscript that makes a web page believe it is always the focused, visible, fo
 - `document.hidden` → always `false`, `document.visibilityState` → always `'visible'`, `document.hasFocus()` → always `true`. On Chrome the legacy `document.webkitHidden` / `document.webkitVisibilityState` aliases are faked too.
 - Swallows `visibilitychange` (and the legacy `webkitvisibilitychange`), and window-level `blur`/`focus`, so page handlers never fire for them.
 - Swallows mouse/pointer events that only signal the cursor leaving or re-entering the window; moves between elements still fire, so menus and hovers keep working.
-- Drives `requestAnimationFrame`, `setTimeout`/`setInterval`, and `requestIdleCallback` off a Web Worker heartbeat, so frames, timers, and idle callbacks keep near-real cadence in a backgrounded tab instead of being paused or clamped.
+- Drives `requestAnimationFrame`, `setTimeout`/`setInterval`, `requestIdleCallback`, and a playing video's `requestVideoFrameCallback` off a Web Worker heartbeat, so frames, timers, idle callbacks, and per-frame video callbacks keep near-real cadence in a backgrounded tab instead of being paused or clamped.
 - Patches frames created by `appendChild`/`append`/etc. and by `innerHTML` / `outerHTML` / `insertAdjacentHTML`, so a same-origin child frame can't be used to read the real `document.hidden`.
 
 The fakes are installed on the prototypes with native names and a patched `Function.prototype.toString`, so a page reading `document.hidden`'s getter — directly, via an iframe realm, or via `window[i]` — sees native-looking code.

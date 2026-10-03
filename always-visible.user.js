@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         Always visible
-// @version      9
+// @version      10
 // @match        *://*/*
 // @run-at       document-start
 // @grant        none
@@ -203,6 +203,39 @@ const patch = (win) => {
       for (const x of due) {
         const deadline = { didTimeout: t >= x.timeoutAt, timeRemaining() { return this.didTimeout ? 0 : 50; } };
         try { x.cb(deadline); } catch (e) { rethrow(e); }
+      }
+    });
+  }
+
+  // <video>.requestVideoFrameCallback stops firing in a hidden tab (the frame never presents), so a
+  // page doing per-frame video work stalls. Drive it off the clock for a video that is actually
+  // playing, synthesizing the frame metadata from the element.
+  // ponytail: metadata is approximate (expectedDisplayTime = now + 16, processingDuration = 0) and
+  // frames advance at the ~16ms tick, not the video's true presentation rate.
+  const VideoEl = win.HTMLVideoElement;
+  if (VideoEl && typeof VideoEl.prototype.requestVideoFrameCallback === 'function') {
+    const nativeRVFC = VideoEl.prototype.requestVideoFrameCallback;
+    const nativeCVFC = VideoEl.prototype.cancelVideoFrameCallback;
+    const rvfcCbs = new Map();
+    let rvfcSeq = 0;
+    const presented = new WeakMap();
+    // nativeCVFC.call(this, 0) is a no-op that still runs the native receiver check, so these throw
+    // on a non-video `this` like the originals.
+    const rvfc = { requestVideoFrameCallback(cb) { nativeCVFC.call(this, 0); const id = ++rvfcSeq; rvfcCbs.set(id, { video: this, cb }); return id; } }.requestVideoFrameCallback;
+    const cvfc = { cancelVideoFrameCallback(id) { nativeCVFC.call(this, 0); rvfcCbs.delete(id); } }.cancelVideoFrameCallback;
+    VideoEl.prototype.requestVideoFrameCallback = disguise(win, rvfc, nativeRVFC);
+    VideoEl.prototype.cancelVideoFrameCallback = disguise(win, cvfc, nativeCVFC);
+    ticks.add(() => {
+      if (!rvfcCbs.size) return;
+      const t = now(), due = [...rvfcCbs.entries()];
+      rvfcCbs.clear();
+      for (const [id, x] of due) {
+        const v = x.video;
+        // No frame presents for a video that isn't playing; hold the callback, as native does.
+        if (v.paused || v.ended || v.readyState < 2) { rvfcCbs.set(id, x); continue; }
+        const n = (presented.get(v) || 0) + 1; presented.set(v, n);
+        const meta = { presentationTime: t, expectedDisplayTime: t + 16, width: v.videoWidth, height: v.videoHeight, mediaTime: v.currentTime, presentedFrames: n, processingDuration: 0 };
+        try { x.cb(t, meta); } catch (e) { rethrow(e); }
       }
     });
   }

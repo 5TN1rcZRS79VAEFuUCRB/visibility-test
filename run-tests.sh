@@ -107,7 +107,7 @@ if command -v chromium >/dev/null && command -v node >/dev/null; then
     local prof="$work/cr-$1"; mkdir -p "$prof"
     chromium --headless=new --no-sandbox --disable-gpu \
       --remote-debugging-port="$4" --user-data-dir="$prof" \
-      "http://localhost:$3/$1.html" >/dev/null 2>&1 &
+      "http://localhost:$3/$1.html?rvfc=1" >/dev/null 2>&1 &
     disown "$!" 2>/dev/null || true  # we stop it with pkill below; don't let job control print "Killed"
     sleep 2.5
     node ./cdp-background.js "$4" "$bg_hold" >/dev/null 2>&1 || true
