@@ -1,0 +1,134 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Visibility test</title>
+<style>
+  body { font: 14px monospace; margin: 16px; background: #111; color: #ddd; }
+  h2 { font-size: 15px; margin: 20px 0 6px; }
+  #status { font-size: 16px; }
+  .bad { color: #f66; }
+  .good { color: #6d6; }
+  #hover { display: inline-block; padding: 12px; border: 1px solid #666; }
+  #hover.on { background: #264; }
+</style>
+<div id="status"></div>
+
+<h2>Breakage checks (run with this window focused)</h2>
+<button id="run">Run again</button>
+<div id="checks"></div>
+<p>Manual: <input id="inp" placeholder="type, then click away"> <span id="inpmsg"></span></p>
+<p>Manual: <span id="hover">hover me: turns green, back to normal when you move off</span></p>
+
+<h2>Detections</h2>
+<div id="log"></div>
+<script>
+  const line = (where, cls, text) => {
+    const d = document.createElement('div');
+    d.className = cls;
+    d.textContent = new Date().toLocaleTimeString() + '  ' + text;
+    document.getElementById(where).prepend(d);
+  };
+  const log = (msg) => line('log', 'bad', 'DETECTED: ' + msg);
+
+  // Events and handler properties.
+  document.addEventListener('visibilitychange', () => log('visibilitychange -> ' + document.visibilityState));
+  document.onvisibilitychange = () => log('onvisibilitychange handler');
+  window.addEventListener('blur', () => log('window blur'));
+  window.addEventListener('focus', () => log('window focus'));
+  window.onblur = () => log('onblur handler');
+  document.addEventListener('mouseleave', () => log('mouseleave (left page)'));
+  document.addEventListener('mouseout', (e) => { if (!e.relatedTarget) log('mouseout (left window)'); });
+  document.addEventListener('mouseover', (e) => { if (!e.relatedTarget) log('mouseover (came back into window)'); });
+
+  // A same-origin iframe has its own untouched copy of the browser APIs.
+  const frame = document.createElement('iframe');
+  frame.style.display = 'none';
+  document.body.append(frame);
+  const realm = frame.contentWindow;
+  // A second iframe reached only via window[1], which skips the contentWindow getter.
+  document.body.append(Object.assign(document.createElement('iframe'), { style: 'display:none' }));
+  const realm2 = window[1];
+  const iframeHidden = () => Object.getOwnPropertyDescriptor(realm.Document.prototype, 'hidden').get.call(document);
+  const iframeFocus = () => realm.Document.prototype.hasFocus.call(document);
+
+  // Signs that the APIs were tampered with.
+  const protoGet = Object.getOwnPropertyDescriptor(Document.prototype, 'hidden').get;
+  const native = (f) => /\[native code\]/.test(Function.prototype.toString.call(f));
+  const nativeViaIframe = (f) => /\[native code\]/.test(realm.Function.prototype.toString.call(f));
+  const tamper = {
+    'own hidden property on document': !!Object.getOwnPropertyDescriptor(document, 'hidden'),
+    'hidden getter not native': !native(protoGet),
+    'hidden getter wrong name': protoGet.name !== 'get hidden',
+    'hasFocus not native': !native(document.hasFocus),
+    'toString not native': !native(Function.prototype.toString),
+    'webkitHidden exists (Firefox has none)': 'webkitHidden' in document,
+    'hidden getter not native (checked via iframe)': !nativeViaIframe(protoGet),
+    'hidden getter from another realm': Object.getPrototypeOf(protoGet) !== Function.prototype,
+    'contentWindow getter not native': !native(Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, 'contentWindow').get),
+    'hidden getter not native (checked via window[1])': !/\[native code\]/.test(realm2.Function.prototype.toString.call(protoGet)),
+  };
+  for (const [name, found] of Object.entries(tamper)) if (found) log('tampering visible: ' + name);
+
+  // Background tabs pause animation frames and slow timers.
+  let lastFrame = performance.now();
+  const frameLoop = (t) => {
+    if (t - lastFrame > 1000) log('animation frames paused ' + Math.round(t - lastFrame) + 'ms');
+    lastFrame = t;
+    requestAnimationFrame(frameLoop);
+  };
+  requestAnimationFrame(frameLoop);
+  let lastTick = performance.now();
+  setInterval(() => {
+    const now = performance.now();
+    if (now - lastTick > 900) log('100ms timer took ' + Math.round(now - lastTick) + 'ms');
+    lastTick = now;
+  }, 100);
+
+  setInterval(() => {
+    document.getElementById('status').textContent =
+      'hidden=' + document.hidden + '  visibilityState=' + document.visibilityState + '  hasFocus=' + document.hasFocus()
+      + '  | via iframe: hidden=' + iframeHidden() + '  hasFocus=' + iframeFocus();
+  }, 500);
+
+  // Breakage checks: normal page behavior the script must not block.
+  const check = (name, ok) => {
+    line('checks', ok ? 'good' : 'bad', (ok ? 'PASS ' : 'FAIL ') + name);
+  };
+  const got = (el, type, fire) => {
+    let seen = false;
+    const h = () => { seen = true; };
+    el.addEventListener(type, h);
+    fire();
+    el.removeEventListener(type, h);
+    return seen;
+  };
+  const runChecks = () => {
+    document.getElementById('checks').textContent = '';
+    const a = document.getElementById('hover');
+    const b = document.getElementById('inp');
+    // Real enter/leave events don't bubble.
+    const mouse = (type, Kind = MouseEvent) => () => a.dispatchEvent(new Kind(type, { bubbles: !/enter|leave/.test(type), relatedTarget: b }));
+    check('mouseout to another element', got(a, 'mouseout', mouse('mouseout')));
+    check('mouseleave to another element', got(a, 'mouseleave', mouse('mouseleave')));
+    check('mouseover from another element', got(a, 'mouseover', mouse('mouseover')));
+    check('mouseenter from another element', got(a, 'mouseenter', mouse('mouseenter')));
+    check('pointerout to another element', got(a, 'pointerout', mouse('pointerout', PointerEvent)));
+    check('touch pointerleave', got(a, 'pointerleave', () => a.dispatchEvent(new PointerEvent('pointerleave', { pointerType: 'touch' }))));
+    check('input focus event', got(b, 'focus', () => b.focus()));
+    check('input blur event', got(b, 'blur', () => b.blur()));
+    check('focusout bubbles to document', got(document, 'focusout', () => { b.focus(); b.blur(); }));
+    check('keydown reaches document', got(document, 'keydown', () => document.body.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true }))));
+    check('other window events', got(window, 'resize', () => window.dispatchEvent(new Event('resize'))));
+    check('hidden is a boolean', typeof document.hidden === 'boolean');
+    check('visibilityState is a string', typeof document.visibilityState === 'string');
+    check('hasFocus returns a boolean', typeof document.hasFocus() === 'boolean');
+  };
+  document.getElementById('run').onclick = runChecks;
+  runChecks();
+
+  // Manual checks.
+  const inp = document.getElementById('inp');
+  const hover = document.getElementById('hover');
+  inp.addEventListener('blur', () => { document.getElementById('inpmsg').textContent = 'blur fired OK'; });
+  hover.addEventListener('mouseenter', () => hover.classList.add('on'));
+  hover.addEventListener('mouseleave', () => hover.classList.remove('on'));
+</script>
