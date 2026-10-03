@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         Always visible
-// @version      8
+// @version      9
 // @match        *://*/*
 // @run-at       document-start
 // @grant        none
@@ -84,6 +84,13 @@ const patch = (win) => {
   // non-Document `this` exactly as the natives do.
   replaceGetter(win, docProto, 'hidden', (self, get) => { get.call(self); return false; });
   replaceGetter(win, docProto, 'visibilityState', (self, get) => { get.call(self); return 'visible'; });
+  // Chrome still exposes the legacy webkit-prefixed aliases and fires webkitvisibilitychange; a page
+  // reading document.webkitHidden would otherwise see the real state. Patch them where they exist.
+  for (const [prop, val] of [['webkitHidden', false], ['webkitVisibilityState', 'visible']]) {
+    if (Object.getOwnPropertyDescriptor(docProto, prop)) {
+      replaceGetter(win, docProto, prop, (self, get) => { get.call(self); return val; });
+    }
+  }
   const nativeHasFocus = docProto.hasFocus;
   const { hasFocus } = { hasFocus() { nativeHasFocus.call(this); return true; } };
   docProto.hasFocus = disguise(win, hasFocus, nativeHasFocus);
@@ -240,7 +247,8 @@ const patch = (win) => {
 
   const block = e => e.stopImmediatePropagation();
 
-  win.addEventListener('visibilitychange', block, true);
+  // webkitvisibilitychange is the legacy alias Chrome still fires; harmless to block where absent.
+  for (const ev of ['visibilitychange', 'webkitvisibilitychange']) win.addEventListener(ev, block, true);
 
   // Block window-level blur/focus only, so form fields still work.
   for (const ev of ['blur', 'focus']) {

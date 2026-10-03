@@ -40,6 +40,7 @@
   // Events and handler properties.
   document.addEventListener('visibilitychange', () => log('visibilitychange -> ' + document.visibilityState));
   document.onvisibilitychange = () => log('onvisibilitychange handler');
+  document.addEventListener('webkitvisibilitychange', () => log('webkitvisibilitychange -> ' + document.webkitVisibilityState));
   window.addEventListener('blur', () => log('window blur'));
   window.addEventListener('focus', () => log('window focus'));
   window.onblur = () => log('onblur handler');
@@ -82,7 +83,6 @@
     'hidden getter wrong name': protoGet.name !== 'get hidden',
     'hasFocus not native': !native(document.hasFocus),
     'toString not native': !native(Function.prototype.toString),
-    'webkitHidden exists (Firefox has none)': 'webkitHidden' in document,
     'hidden getter not native (checked via iframe)': !nativeViaIframe(protoGet),
     'hidden getter from another realm': Object.getPrototypeOf(protoGet) !== Function.prototype,
     'contentWindow getter not native': !native(Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, 'contentWindow').get),
@@ -95,6 +95,14 @@
     'visibilityState getter from another realm': Object.getPrototypeOf(vgetter) !== Function.prototype,
     'visibilityState getter not native (checked via iframe)': !nativeViaIframe(vgetter),
   });
+  // Legacy webkit-prefixed aliases (Chrome only). If present, the script should fake them and keep
+  // the getters native-looking; absent (Firefox) these checks are skipped.
+  for (const prop of ['webkitHidden', 'webkitVisibilityState']) {
+    const d = Object.getOwnPropertyDescriptor(Document.prototype, prop);
+    if (!d || !d.get) continue;
+    tamper[prop + ' getter not native'] = !native(d.get);
+    tamper[prop + ' getter from another realm'] = Object.getPrototypeOf(d.get) !== Function.prototype;
+  }
   // The script replaces these with fakes; confirm each still looks native and same-realm.
   const faked = ['setTimeout', 'setInterval', 'clearTimeout', 'clearInterval', 'requestAnimationFrame', 'cancelAnimationFrame'];
   if (window.requestIdleCallback) faked.push('requestIdleCallback', 'cancelIdleCallback');
@@ -186,6 +194,15 @@
   hiddenLeak(log, 'innerHTML-created frame', () => realm3);
   // The srcdoc frame was inserted via append, which the script claims to cover.
   hiddenLeak(log, 'srcdoc frame', realm4);
+  // Legacy webkitHidden (Chrome) is now patched; a true here while backgrounded is a real leak.
+  if ('webkitHidden' in document) {
+    let prevWK = false;
+    setInterval(() => {
+      const h = document.webkitHidden;
+      if (h && !prevWK) log('document.webkitHidden leaked true (real visibility via legacy alias)');
+      prevWK = h;
+    }, 500);
+  }
   // Losing window focus also blurs the focused element, and focus stays on it. The script only
   // hides window-level blur. (Focus the input above, then switch away.)
   document.addEventListener('focusout', (e) => setTimeout(() => {
@@ -214,8 +231,9 @@
   let lastStatus = '';
   setInterval(() => {
     const s = 'hidden=' + document.hidden + '  visibilityState=' + document.visibilityState + '  hasFocus=' + document.hasFocus()
+      + ('webkitHidden' in document ? '  webkitHidden=' + document.webkitHidden : '')
       + '  | via iframe: hidden=' + iframeHidden() + '  hasFocus=' + iframeFocus()
-      + '  | innerHTML frame (unpatched): hidden=' + realm3.document.hidden;
+      + '  | innerHTML frame (now patched): hidden=' + realm3.document.hidden;
     document.getElementById('status').textContent = s;
     if (s !== lastStatus) { lastStatus = s; report('STATUS ' + s); }
   }, 500);
