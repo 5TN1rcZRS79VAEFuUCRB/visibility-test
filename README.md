@@ -29,4 +29,9 @@ Needs a userscript manager (Tampermonkey, Violentmonkey, or similar). Open `alwa
 
 `index.html` is a test page. Open it, keep it focused, and click **Run again** to confirm normal page behavior still works (hover, focus/blur, keyboard, input events). Then switch to another tab or window: with the script active, the **Detections** list should stay empty — no visibility change, no focus loss, no paused frames, no visible tampering.
 
-`./run-tests.sh` runs the breakage and tamper checks automatically: it loads the page in headless Firefox with the script inlined and fails if any breakage check fails or anything detects the script, except the documented worker-tick ceilings (~16 ms timer resolution and the extra dispatcher stack frames). Needs `firefox` and `python3`. Headless can't background a tab, so the GAP/leak probes (which need a real hidden tab) aren't exercised — switch tabs manually for those.
+`./run-tests.sh` runs the checks automatically in two passes:
+
+- **Foreground (Firefox):** every breakage check passes, each suppressed event is swallowed with the script and fires without it, and nothing detects the script except the documented worker-tick ceilings (~16 ms timer resolution and the extra dispatcher stack frames). Needs `firefox` and `python3`.
+- **Backgrounded (Chromium):** `cdp-background.js` opens a second tab over the DevTools protocol (Node's built-in WebSocket, no dependencies) so the page is genuinely hidden, then checks the fakes hold — no visibility/focus leak, no frame leak, no timer/rAF throttle — while the no-script baseline must fire those detections so the pass can't go green vacuously. Needs `chromium` and `node`; skipped if either is absent.
+
+Both read the results the page already beacons to the local server. The two documented browser-driven GAPs (Chrome's visibility-state performance entry, Page Lifecycle freeze/resume) are not asserted.

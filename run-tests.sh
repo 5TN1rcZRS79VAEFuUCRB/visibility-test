@@ -1,27 +1,34 @@
 #!/usr/bin/env bash
 # Headless regression test for the Always visible userscript.
 #
-# Loads index.html in headless Firefox twice -- once plain, once with
-# always-visible.user.js inlined (headless has no userscript manager) -- and
-# checks that with the script active every breakage check still passes and
-# nothing detects the script, except the documented worker-tick ceilings
-# (~16ms timer resolution and the extra dispatcher stack frames).
+# Two passes, both loading index.html with always-visible.user.js inlined
+# (headless browsers have no userscript manager) and reading results from the
+# beacons the page sends as GET /report?<msg> (see index.html):
 #
-# The page beacons each result to the local server as GET /report?<msg>
-# (see index.html), so we read results straight from the server log; no browser
-# automation protocol needed. GAP/leak probes need a real backgrounded tab and
-# cannot fire headless, so they are not asserted here.
+#   1. Foreground (Firefox): every breakage check passes and nothing detects the
+#      script, except the documented worker-tick ceilings (~16ms timer
+#      resolution and the extra dispatcher stack frames). Suppression checks pass
+#      with the script and fail without it.
+#   2. Backgrounded (Chromium, via cdp-background.js): with the tab genuinely
+#      hidden, the fakes hold -- no visibility/focus leak, no frame leak, no
+#      timer/rAF throttle. The no-script baseline must fire those detections, so
+#      the pass can't go green vacuously. Skipped if chromium or node is absent.
 set -euo pipefail
 cd "$(dirname "$0")"
 
 command -v firefox >/dev/null || { echo "firefox required"; exit 1; }
 command -v python3 >/dev/null || { echo "python3 required"; exit 1; }
 
-port=${PORT:-8765}
 wait_s=${WAIT:-10}
+bg_hold=${BG_HOLD:-9000}
 work=$(mktemp -d)
 srv=
-cleanup() { [[ -n $srv ]] && kill "$srv" 2>/dev/null; rm -rf "$work"; }
+cleanup() {
+  [[ -n ${srv:-} ]] && kill "$srv" 2>/dev/null || true
+  pkill -9 -f "$work" 2>/dev/null || true
+  rm -rf "$work" || true
+  return 0
+}
 trap cleanup EXIT
 
 cp index.html "$work/base.html"
@@ -35,17 +42,17 @@ html = html.replace('<meta charset="utf-8">',
 open(sys.argv[1], 'w').write(html)
 PY
 
-serve() { ( cd "$work" && exec python3 -m http.server "$port" ) >"$1" 2>&1 & srv=$!; sleep 1; }
-stop()  { kill "$srv" 2>/dev/null; wait "$srv" 2>/dev/null || true; srv=; }
-visit() {
-  local prof; prof=$(mktemp -d)
-  firefox --headless --no-remote --profile "$prof" "http://localhost:$port/$1.html" >/dev/null 2>&1 &
-  local ff=$!; sleep "$wait_s"; kill "$ff" 2>/dev/null; wait "$ff" 2>/dev/null || true
-  rm -rf "$prof"
-}
+serve() { ( cd "$work" && exec python3 -m http.server "$1" ) >"$2" 2>&1 & srv=$!; sleep 1; }
+stop()  { [[ -n $srv ]] && kill "$srv" 2>/dev/null; wait "$srv" 2>/dev/null || true; srv=; }
 
-echo "running (with script)..."; serve "$work/with.log"; visit with; stop
-echo "running (no script)...";   serve "$work/base.log"; visit base; stop
+# --- Pass 1: foreground, Firefox ---
+visit_fg() {
+  local prof; prof="$work/ff-$1"; mkdir -p "$prof"
+  firefox --headless --no-remote --profile "$prof" "http://localhost:8765/$1.html" >/dev/null 2>&1 &
+  local ff=$!; sleep "$wait_s"; kill "$ff" 2>/dev/null || true; wait "$ff" 2>/dev/null || true
+}
+echo "running (firefox, foreground, with script)..."; serve 8765 "$work/with.log"; visit_fg with; stop
+echo "running (firefox, foreground, no script)...";   serve 8765 "$work/base.log"; visit_fg base; stop
 
 python3 - "$work/with.log" "$work/base.log" <<'PY'
 import sys, re, urllib.parse
@@ -87,8 +94,70 @@ for m in base_fails:   errs.append('baseline breakage (no script): ' + m)
 for m in sw_pass_base: errs.append('suppressed without script (test lacks teeth): ' + m)
 
 if errs:
-    print('FAIL')
+    print('FAIL (foreground)')
     for e in errs: print('  ' + e)
     sys.exit(1)
-print(f'PASS ({passes} checks, {sw_total} suppressions, only documented ceilings detected)')
+print(f'PASS foreground ({passes} checks, {sw_total} suppressions, only documented ceilings detected)')
 PY
+
+# --- Pass 2: backgrounded, Chromium ---
+if command -v chromium >/dev/null && command -v node >/dev/null; then
+  visit_bg() { # $1 page  $2 logfile  $3 httpport  $4 debugport
+    serve "$3" "$2"
+    local prof="$work/cr-$1"; mkdir -p "$prof"
+    chromium --headless=new --no-sandbox --disable-gpu \
+      --remote-debugging-port="$4" --user-data-dir="$prof" \
+      "http://localhost:$3/$1.html" >/dev/null 2>&1 &
+    disown "$!" 2>/dev/null || true  # we stop it with pkill below; don't let job control print "Killed"
+    sleep 2.5
+    node ./cdp-background.js "$4" "$bg_hold" >/dev/null 2>&1 || true
+    pkill -9 -f "$prof" 2>/dev/null || true
+    stop
+  }
+  echo "running (chromium, backgrounded, with script)..."; visit_bg with "$work/bgwith.log" 8775 9341
+  echo "running (chromium, backgrounded, no script)...";   visit_bg base "$work/bgbase.log" 8776 9342
+
+  python3 - "$work/bgwith.log" "$work/bgbase.log" <<'PY'
+import sys, re, urllib.parse
+
+def msgs(path):
+    out = []
+    for l in open(path, errors='replace'):
+        m = re.search(r'GET /report\?(\S+)', l)
+        if m:
+            out.append(urllib.parse.unquote(m.group(1)))
+    return out
+
+bgw, bgb = msgs(sys.argv[1]), msgs(sys.argv[2])
+CEILING = re.compile(r'callback has \d+ frames|averages [\d.]+ms')
+
+# With the script, a genuinely hidden tab must leak nothing and not be throttled.
+# (GAP lines are documented browser-driven paths a page script can't cover; not asserted.)
+leaks = [m for m in bgw if m.startswith('DETECTED:') and not CEILING.search(m)]
+status = [m for m in bgw if m.startswith('STATUS')]
+# The fakes should keep reporting visible even while hidden.
+held = any('hidden=false' in s and 'visibilityState=visible' in s for s in status)
+# Baseline: the same probes must fire when hidden and unprotected (proves teeth).
+base_leaks = [m for m in bgb if m.startswith('DETECTED:')]
+
+errs = []
+if not status:
+    errs.append('no STATUS beacon with script -- page did not load?')
+elif not held:
+    errs.append('fakes did not hold while backgrounded: ' + status[-1])
+for m in leaks:
+    errs.append('leak while backgrounded (with script): ' + m)
+if len(base_leaks) < 3:
+    errs.append(f'baseline backgrounded fired only {len(base_leaks)} detections -- backgrounding failed?')
+
+if errs:
+    print('FAIL (backgrounded)')
+    for e in errs: print('  ' + e)
+    sys.exit(1)
+print(f'PASS backgrounded (fakes held hidden; {len(base_leaks)} leaks detected in baseline)')
+PY
+else
+  echo "skip: chromium + node not found, backgrounded pass skipped"
+fi
+
+exit 0
