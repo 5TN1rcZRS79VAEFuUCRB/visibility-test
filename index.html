@@ -171,12 +171,17 @@
 
   // Background tabs pause animation frames and slow timers.
   let lastFrame = performance.now();
-  const frameLoop = (t) => {
-    if (t - lastFrame > 1000) log('animation frames paused ' + Math.round(t - lastFrame) + 'ms');
-    lastFrame = t;
-    requestAnimationFrame(frameLoop);
-  };
+  const frameLoop = (t) => { lastFrame = t; requestAnimationFrame(frameLoop); };
   requestAnimationFrame(frameLoop);
+  // A paused rAF loop can't measure its own stall (it never runs), so watch it from a timer, which
+  // keeps ticking (throttled) when hidden. This catches a pause that lasts the whole time the tab is
+  // backgrounded, which frameLoop alone would only report once the tab came back.
+  let framePauseLogged = false;
+  setInterval(() => {
+    const stale = performance.now() - lastFrame;
+    if (stale > 1000 && !framePauseLogged) { log('animation frames paused ' + Math.round(stale) + 'ms'); framePauseLogged = true; }
+    else if (stale <= 1000) framePauseLogged = false;
+  }, 300);
   let lastTick = performance.now();
   setInterval(() => {
     const now = performance.now();
