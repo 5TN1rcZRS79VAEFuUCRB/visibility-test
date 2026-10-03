@@ -17,6 +17,7 @@
 <div id="checks"></div>
 <p>Manual: <input id="inp" placeholder="type, then click away"> <span id="inpmsg"></span></p>
 <p>Manual: <span id="hover">hover me: turns green, back to normal when you move off</span></p>
+<p>Manual: <button id="popup">Open popup &amp; check it is patched</button> <span id="popupmsg"></span></p>
 
 <h2>Detections</h2>
 <p>DETECTED = the script's disguise failed. GAP = a path the script never covers; these can fire even when it is working.</p>
@@ -296,4 +297,20 @@
   inp.addEventListener('blur', () => { document.getElementById('inpmsg').textContent = 'blur fired OK'; report('MANUAL input blur fired'); });
   hover.addEventListener('mouseenter', () => { hover.classList.add('on'); report('MANUAL hover enter'); });
   hover.addEventListener('mouseleave', () => { hover.classList.remove('on'); report('MANUAL hover leave'); });
+
+  // Popups open their own realm; the script patches what window.open returns. Manual because a
+  // popup can't open without a click and shouldn't spawn on page load. (Headless blocks it.)
+  document.getElementById('popup').onclick = () => {
+    const msg = document.getElementById('popupmsg');
+    const p = window.open('', '_blank', 'width=200,height=120');
+    if (!p) { msg.textContent = 'blocked by popup blocker'; return; }
+    let seen = false;
+    p.addEventListener('visibilitychange', () => { seen = true; });
+    p.dispatchEvent(new p.Event('visibilitychange'));
+    const patched = !seen; // swallowed = patched
+    msg.className = patched ? 'good' : 'bad';
+    msg.textContent = patched ? 'PASS: popup realm patched' : 'FAIL: popup realm not patched';
+    report('MANUAL popup patched=' + patched);
+    p.close();
+  };
 </script>

@@ -16,7 +16,7 @@ The fakes are installed on the prototypes with native names and a patched `Funct
 
 ### Limits
 
-- Frames opened with `window.open()` are not patched.
+- `window.open()` popups are patched on the returned window and again on load, but a cross-origin popup can't be patched, and an in-popup SPA navigation after its first load isn't re-caught.
 - Faked timer/rAF/idle callbacks run from the worker tick, so their resolution is ~16 ms and their call stack carries the dispatcher's frames — both distinguishable from native callbacks by a page that looks.
 - If a `Worker` is blocked (e.g. CSP `worker-src`), it falls back to a native timer, which the browser still throttles when the tab is hidden — so the background pause can reappear.
 - Timer resolution becomes the ~16 ms worker tick, so very short delays fire a little later and batch per tick.

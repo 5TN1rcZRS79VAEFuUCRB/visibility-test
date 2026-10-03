@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         Always visible
-// @version      7
+// @version      8
 // @match        *://*/*
 // @run-at       document-start
 // @grant        none
@@ -137,6 +137,23 @@ const patch = (win) => {
       return r;
     } }.insertAdjacentHTML;
     win.Element.prototype.insertAdjacentHTML = disguise(win, fake, nativeIAH);
+  }
+
+  // A window.open() popup is its own top-level realm. Patch what it returns now (covers an
+  // about:blank popup used synchronously) and again on load (covers one opened to a same-origin URL,
+  // whose document realm is replaced once that URL loads).
+  // ponytail: a cross-origin popup can't be patched, and an SPA navigation inside the popup after
+  // its first load isn't re-caught; only the initial document is.
+  const nativeOpen = win.open;
+  if (typeof nativeOpen === 'function') {
+    const fake = { open(...args) {
+      const w = nativeOpen.apply(this, args);
+      try {
+        if (w) { patch(w); w.addEventListener('load', () => { try { patch(w); } catch {} }); }
+      } catch {} // cross-origin popup
+      return w;
+    } }.open;
+    win.open = disguise(win, fake, nativeOpen);
   }
 
   // Run rAF and timers off the background clock so a hidden tab shows no frame/timer pause.
