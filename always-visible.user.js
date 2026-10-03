@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         Always visible
-// @version      10
+// @version      11
 // @match        *://*/*
 // @run-at       document-start
 // @grant        none
@@ -95,7 +95,7 @@ const patch = (win) => {
   const { hasFocus } = { hasFocus() { nativeHasFocus.call(this); return true; } };
   docProto.hasFocus = disguise(win, hasFocus, nativeHasFocus);
 
-  for (const El of [win.HTMLIFrameElement, win.HTMLFrameElement, win.HTMLObjectElement]) {
+  for (const El of [win.HTMLIFrameElement, win.HTMLFrameElement]) {
     replaceGetter(win, El.prototype, 'contentWindow', (el, get) => {
       const w = get.call(el);
       if (w) patch(w);
