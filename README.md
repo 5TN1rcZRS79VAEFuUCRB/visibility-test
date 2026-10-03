@@ -28,3 +28,5 @@ Needs a userscript manager (Tampermonkey, Violentmonkey, or similar). Open `alwa
 ## Testing
 
 `index.html` is a test page. Open it, keep it focused, and click **Run again** to confirm normal page behavior still works (hover, focus/blur, keyboard, input events). Then switch to another tab or window: with the script active, the **Detections** list should stay empty — no visibility change, no focus loss, no paused frames, no visible tampering.
+
+`./run-tests.sh` runs the breakage and tamper checks automatically: it loads the page in headless Firefox with the script inlined and fails if any breakage check fails or anything detects the script, except the documented worker-tick ceilings (~16 ms timer resolution and the extra dispatcher stack frames). Needs `firefox` and `python3`. Headless can't background a tab, so the GAP/leak probes (which need a real hidden tab) aren't exercised — switch tabs manually for those.
