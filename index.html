@@ -22,11 +22,16 @@
 <p>DETECTED = the script's disguise failed. GAP = a path the script never covers; these can fire even when it is working.</p>
 <div id="log"></div>
 <script>
+  // Beacon every line to the local server (python http.server logs the request path), so the
+  // page's results are readable without a browser. Harmless 404 if no server is listening.
+  const report = (msg) => { try { new Image().src = '/report?' + encodeURIComponent(msg); } catch {} };
+  report('PING');
   const line = (where, cls, text) => {
     const d = document.createElement('div');
     d.className = cls;
     d.textContent = new Date().toLocaleTimeString() + '  ' + text;
     document.getElementById(where).prepend(d);
+    report(text);
   };
   const log = (msg) => line('log', 'bad', 'DETECTED: ' + msg);
   const gap = (msg) => line('log', 'bad', 'GAP (script does not cover this): ' + msg);
@@ -123,16 +128,18 @@
   };
   if (window.requestIdleCallback) requestIdleCallback(idleProbe);
 
+  let lastStatus = '';
   setInterval(() => {
-    document.getElementById('status').textContent =
-      'hidden=' + document.hidden + '  visibilityState=' + document.visibilityState + '  hasFocus=' + document.hasFocus()
+    const s = 'hidden=' + document.hidden + '  visibilityState=' + document.visibilityState + '  hasFocus=' + document.hasFocus()
       + '  | via iframe: hidden=' + iframeHidden() + '  hasFocus=' + iframeFocus()
       + '  | innerHTML frame (unpatched): hidden=' + realm3.document.hidden;
+    document.getElementById('status').textContent = s;
+    if (s !== lastStatus) { lastStatus = s; report('STATUS ' + s); }
   }, 500);
 
   // Breakage checks: normal page behavior the script must not block.
   const check = (name, ok) => {
-    line('checks', ok ? 'good' : 'bad', (ok ? 'PASS ' : 'FAIL ') + name);
+    line('checks', ok ? 'good' : 'bad', 'CHECK ' + (ok ? 'PASS ' : 'FAIL ') + name);
   };
   const got = (el, type, fire) => {
     let seen = false;
@@ -177,7 +184,7 @@
   // Manual checks.
   const inp = document.getElementById('inp');
   const hover = document.getElementById('hover');
-  inp.addEventListener('blur', () => { document.getElementById('inpmsg').textContent = 'blur fired OK'; });
-  hover.addEventListener('mouseenter', () => hover.classList.add('on'));
-  hover.addEventListener('mouseleave', () => hover.classList.remove('on'));
+  inp.addEventListener('blur', () => { document.getElementById('inpmsg').textContent = 'blur fired OK'; report('MANUAL input blur fired'); });
+  hover.addEventListener('mouseenter', () => { hover.classList.add('on'); report('MANUAL hover enter'); });
+  hover.addEventListener('mouseleave', () => { hover.classList.remove('on'); report('MANUAL hover leave'); });
 </script>
