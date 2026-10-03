@@ -9,13 +9,15 @@ A userscript that makes a web page believe it is always the focused, visible, fo
 - `document.hidden` → always `false`, `document.visibilityState` → always `'visible'`, `document.hasFocus()` → always `true`.
 - Swallows `visibilitychange`, and window-level `blur`/`focus`, so page handlers never fire for them.
 - Swallows mouse/pointer events that only signal the cursor leaving or re-entering the window; moves between elements still fire, so menus and hovers keep working.
-- Drives `requestAnimationFrame` and `setTimeout`/`setInterval` off a Web Worker heartbeat, so frames and timers keep near-real cadence in a backgrounded tab instead of being paused or clamped.
+- Drives `requestAnimationFrame`, `setTimeout`/`setInterval`, and `requestIdleCallback` off a Web Worker heartbeat, so frames, timers, and idle callbacks keep near-real cadence in a backgrounded tab instead of being paused or clamped.
+- Patches frames created by `appendChild`/`append`/etc. and by `innerHTML` / `outerHTML` / `insertAdjacentHTML`, so a same-origin child frame can't be used to read the real `document.hidden`.
 
 The fakes are installed on the prototypes with native names and a patched `Function.prototype.toString`, so a page reading `document.hidden`'s getter — directly, via an iframe realm, or via `window[i]` — sees native-looking code.
 
 ### Limits
 
-- Frames created by `innerHTML` / `outerHTML` / `insertAdjacentHTML` or `window.open()` are not patched.
+- Frames opened with `window.open()` are not patched.
+- Faked timer/rAF/idle callbacks run from the worker tick, so their resolution is ~16 ms and their call stack carries the dispatcher's frames — both distinguishable from native callbacks by a page that looks.
 - If a `Worker` is blocked (e.g. CSP `worker-src`), it falls back to a native timer, which the browser still throttles when the tab is hidden — so the background pause can reappear.
 - Timer resolution becomes the ~16 ms worker tick, so very short delays fire a little later and batch per tick.
 

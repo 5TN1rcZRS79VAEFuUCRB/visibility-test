@@ -95,7 +95,9 @@
     'visibilityState getter not native (checked via iframe)': !nativeViaIframe(vgetter),
   });
   // The script replaces these with fakes; confirm each still looks native and same-realm.
-  for (const name of ['setTimeout', 'setInterval', 'clearTimeout', 'clearInterval', 'requestAnimationFrame', 'cancelAnimationFrame']) {
+  const faked = ['setTimeout', 'setInterval', 'clearTimeout', 'clearInterval', 'requestAnimationFrame', 'cancelAnimationFrame'];
+  if (window.requestIdleCallback) faked.push('requestIdleCallback', 'cancelIdleCallback');
+  for (const name of faked) {
     const f = window[name];
     tamper[name + ' not native'] = !native(f);
     tamper[name + ' from another realm'] = Object.getPrototypeOf(f) !== Function.prototype;
@@ -178,8 +180,9 @@
       prev = h;
     }, 500);
   };
-  // The innerHTML-made frame keeps the real document.hidden, so it leaks true when backgrounded.
-  hiddenLeak(gap, 'innerHTML-created frame', () => realm3);
+  // The innerHTML-made frame is now patched via the wrapped innerHTML setter, so a hidden=true
+  // leak here is a real failure. (Needs manual backgrounding; can't fire headless.)
+  hiddenLeak(log, 'innerHTML-created frame', () => realm3);
   // The srcdoc frame was inserted via append, which the script claims to cover.
   hiddenLeak(log, 'srcdoc frame', realm4);
   // Losing window focus also blurs the focused element, and focus stays on it. The script only
@@ -196,11 +199,12 @@
   // Page Lifecycle: Chrome freezes long-backgrounded tabs and may discard them.
   for (const ev of ['freeze', 'resume']) document.addEventListener(ev, () => gap('page lifecycle ' + ev + ' event'));
   if (document.wasDiscarded) gap('document.wasDiscarded is true');
-  // requestIdleCallback is unpatched, so the browser still throttles it when the tab is hidden.
+  // requestIdleCallback is now driven off the clock, so it should not be throttled when hidden.
+  // A long delay here is a real failure. (Needs manual backgrounding; can't fire headless.)
   let lastIdle = performance.now();
   const idleProbe = () => {
     const n = performance.now();
-    if (n - lastIdle > 3000) gap('requestIdleCallback delayed ' + Math.round(n - lastIdle) + 'ms');
+    if (n - lastIdle > 3000) log('requestIdleCallback delayed ' + Math.round(n - lastIdle) + 'ms');
     lastIdle = n;
     requestIdleCallback(idleProbe);
   };
@@ -276,6 +280,12 @@
     };
     reaches('setTimeout', (f) => setTimeout(f, 0));
     reaches('requestAnimationFrame', (f) => requestAnimationFrame(f));
+    if (window.requestIdleCallback) {
+      const i0 = performance.now();
+      requestIdleCallback((d) => check('requestIdleCallback fires (<200ms) with a deadline', performance.now() - i0 < 200 && typeof d.timeRemaining === 'function'), { timeout: 100 });
+      let icf = false; const icid = requestIdleCallback(() => { icf = true; }); cancelIdleCallback(icid);
+      setTimeout(() => check('cancelIdleCallback cancels', !icf), 80);
+    }
   };
   document.getElementById('run').onclick = runChecks;
   runChecks();

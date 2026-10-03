@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         Always visible
-// @version      6
+// @version      7
 // @match        *://*/*
 // @run-at       document-start
 // @grant        none
@@ -117,6 +117,28 @@ const patch = (win) => {
   for (const name of ['appendChild', 'insertBefore', 'replaceChild']) wrapInsert(win.Node.prototype, name);
   for (const name of ['append', 'prepend', 'before', 'after', 'replaceWith', 'insertAdjacentElement']) wrapInsert(win.Element.prototype, name);
 
+  // Frames parsed from an HTML string (innerHTML/outerHTML/insertAdjacentHTML) skip the node-
+  // insertion wrappers above, so patch after those too. Only walk when the string could contain a
+  // frame, to keep these hot sinks cheap.
+  const mayHaveFrame = (html) => typeof html === 'string' && /<(iframe|frame)[\s/>]/i.test(html);
+  const wrapHtmlSetter = (proto, name) => {
+    const desc = proto && Object.getOwnPropertyDescriptor(proto, name);
+    if (!desc || !desc.set) return;
+    const set = { [name](v) { desc.set.call(this, v); if (mayHaveFrame(v)) patchFrames(win); } }[name];
+    Object.defineProperty(proto, name, { ...desc, set: disguise(win, set, desc.set) });
+  };
+  wrapHtmlSetter(win.Element.prototype, 'innerHTML');
+  wrapHtmlSetter(win.Element.prototype, 'outerHTML');
+  const nativeIAH = win.Element.prototype.insertAdjacentHTML;
+  if (typeof nativeIAH === 'function') {
+    const fake = { insertAdjacentHTML(pos, html) {
+      const r = nativeIAH.call(this, pos, html);
+      if (mayHaveFrame(html)) patchFrames(win);
+      return r;
+    } }.insertAdjacentHTML;
+    win.Element.prototype.insertAdjacentHTML = disguise(win, fake, nativeIAH);
+  }
+
   // Run rAF and timers off the background clock so a hidden tab shows no frame/timer pause.
   startHeartbeat();
   const now = () => win.performance.now();
@@ -139,6 +161,27 @@ const patch = (win) => {
     rafCbs.clear();
     for (const cb of due) { try { cb(t); } catch (e) { rethrow(e); } }
   });
+
+  // requestIdleCallback is throttled/stopped in a hidden tab too, so drive it off the clock as well.
+  // ponytail: deadline reports a flat 50ms remaining and callbacks fire every tick rather than only
+  // when the browser is genuinely idle — fine for keep-alive, looser than native idle scheduling.
+  if (typeof win.requestIdleCallback === 'function') {
+    const idleCbs = new Map();
+    let idleSeq = 0;
+    const ric = { requestIdleCallback(cb, opts) { illegal(this); const id = ++idleSeq; idleCbs.set(id, { cb, timeoutAt: opts?.timeout ? now() + +opts.timeout : Infinity }); return id; } }.requestIdleCallback;
+    const cic = { cancelIdleCallback(id) { illegal(this); idleCbs.delete(id); } }.cancelIdleCallback;
+    win.requestIdleCallback = disguise(win, ric, win.requestIdleCallback);
+    win.cancelIdleCallback = disguise(win, cic, win.cancelIdleCallback);
+    ticks.add(() => {
+      if (!idleCbs.size) return;
+      const t = now(), due = [...idleCbs.values()];
+      idleCbs.clear();
+      for (const x of due) {
+        const deadline = { didTimeout: t >= x.timeoutAt, timeRemaining() { return this.didTimeout ? 0 : 50; } };
+        try { x.cb(deadline); } catch (e) { rethrow(e); }
+      }
+    });
+  }
 
   // ponytail: worker-driven dispatch has two tells with no cheap fix. (1) Resolution is the ~16ms
   // worker tick, so setTimeout(fn,0)/short delays fire later and batch per tick. (2) Callbacks run
