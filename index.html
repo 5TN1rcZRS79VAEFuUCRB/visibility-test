@@ -19,6 +19,10 @@
 <p>Manual: <span id="hover">hover me: turns green, back to normal when you move off</span></p>
 <p>Manual: <button id="popup">Open popup &amp; check it is patched</button> <span id="popupmsg"></span></p>
 
+<h2>Suppression checks (PASS only with the script active)</h2>
+<p>Synthetic events the script must swallow. Without the script these all FAIL — that is expected.</p>
+<div id="swallow"></div>
+
 <h2>Detections</h2>
 <p>DETECTED = the script's disguise failed. GAP = a path the script never covers; these can fire even when it is working.</p>
 <div id="log"></div>
@@ -306,8 +310,37 @@
       setTimeout(() => check('cancelIdleCallback cancels', !icf), 80);
     }
   };
-  document.getElementById('run').onclick = runChecks;
   runChecks();
+
+  // Suppression checks: synthetically dispatch the events the script must swallow and confirm no
+  // handler sees them. These exercise the stopImmediatePropagation path headlessly (no real
+  // backgrounding needed). PASS only with the script active; without it they FAIL, which is the
+  // proof the events really do reach handlers normally.
+  const swallow = (label, target, type, factory) => {
+    let seen = false;
+    const h = () => { seen = true; };
+    target.addEventListener(type, h, true);
+    target.addEventListener(type, h);
+    target.dispatchEvent(factory());
+    target.removeEventListener(type, h, true);
+    target.removeEventListener(type, h);
+    const d = document.createElement('div');
+    d.className = seen ? 'bad' : 'good';
+    d.textContent = (seen ? 'SWALLOW FAIL ' : 'SWALLOW PASS ') + label;
+    document.getElementById('swallow').prepend(d);
+    report((seen ? 'SWALLOW FAIL ' : 'SWALLOW PASS ') + label);
+  };
+  const runSwallow = () => {
+    document.getElementById('swallow').textContent = '';
+    swallow('visibilitychange', document, 'visibilitychange', () => new Event('visibilitychange'));
+    swallow('webkitvisibilitychange', document, 'webkitvisibilitychange', () => new Event('webkitvisibilitychange'));
+    swallow('window blur', window, 'blur', () => new Event('blur'));
+    swallow('window focus', window, 'focus', () => new Event('focus'));
+    swallow('mouseout leaving window', document.body, 'mouseout', () => new MouseEvent('mouseout', { bubbles: true, relatedTarget: null }));
+    swallow('pointerout leaving window', document.body, 'pointerout', () => new PointerEvent('pointerout', { bubbles: true, relatedTarget: null, pointerType: 'mouse' }));
+  };
+  runSwallow();
+  document.getElementById('run').onclick = () => { runChecks(); runSwallow(); };
 
   // Manual checks.
   const inp = document.getElementById('inp');

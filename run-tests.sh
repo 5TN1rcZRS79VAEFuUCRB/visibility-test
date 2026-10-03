@@ -69,16 +69,26 @@ dets  = [m for m in with_m if m.startswith('DETECTED:') and not CEILING.search(m
 passes = sum(m.startswith('CHECK PASS') for m in with_m)
 base_fails = [m for m in base_m if m.startswith('CHECK FAIL')]
 
+# Suppression: every swallowed event must PASS with the script and FAIL without it
+# (a PASS without the script means the test didn't actually fire the event).
+sw_fail_with = [m for m in with_m if m.startswith('SWALLOW FAIL')]
+sw_pass_base = [m for m in base_m if m.startswith('SWALLOW PASS')]
+sw_total = sum(m.startswith('SWALLOW ') for m in with_m)
+
 errs = []
 if passes < 20:
     errs.append(f'only {passes} checks ran with the script -- page did not load?')
-for m in fails:      errs.append('breakage: ' + m)
-for m in dets:       errs.append('detected: ' + m)
-for m in base_fails: errs.append('baseline breakage (no script): ' + m)
+if sw_total < 5:
+    errs.append(f'only {sw_total} suppression checks ran -- page did not load?')
+for m in fails:        errs.append('breakage: ' + m)
+for m in dets:         errs.append('detected: ' + m)
+for m in sw_fail_with: errs.append('not suppressed with script: ' + m)
+for m in base_fails:   errs.append('baseline breakage (no script): ' + m)
+for m in sw_pass_base: errs.append('suppressed without script (test lacks teeth): ' + m)
 
 if errs:
     print('FAIL')
     for e in errs: print('  ' + e)
     sys.exit(1)
-print(f'PASS ({passes} checks, only documented ceilings detected)')
+print(f'PASS ({passes} checks, {sw_total} suppressions, only documented ceilings detected)')
 PY
