@@ -19,6 +19,7 @@
 <p>Manual: <span id="hover">hover me: turns green, back to normal when you move off</span></p>
 
 <h2>Detections</h2>
+<p>DETECTED = the script's disguise failed. GAP = a path the script never covers; these can fire even when it is working.</p>
 <div id="log"></div>
 <script>
   const line = (where, cls, text) => {
@@ -28,6 +29,7 @@
     document.getElementById(where).prepend(d);
   };
   const log = (msg) => line('log', 'bad', 'DETECTED: ' + msg);
+  const gap = (msg) => line('log', 'bad', 'GAP (script does not cover this): ' + msg);
 
   // Events and handler properties.
   document.addEventListener('visibilitychange', () => log('visibilitychange -> ' + document.visibilityState));
@@ -47,6 +49,13 @@
   // A second iframe reached only via window[1], which skips the contentWindow getter.
   document.body.append(Object.assign(document.createElement('iframe'), { style: 'display:none' }));
   const realm2 = window[1];
+  // A third iframe inserted via innerHTML on an already-connected node. The script wraps
+  // appendChild/insertBefore/append/etc. but NOT innerHTML, so this frame's realm is never
+  // patched. Read it via its window index so the (wrapped) contentWindow getter can't patch it.
+  const holder = document.createElement('div');
+  document.body.append(holder);
+  holder.innerHTML = '<iframe style="display:none"></iframe>';
+  const realm3 = window[window.length - 1];
   const iframeHidden = () => Object.getOwnPropertyDescriptor(realm.Document.prototype, 'hidden').get.call(document);
   const iframeFocus = () => realm.Document.prototype.hasFocus.call(document);
 
@@ -66,6 +75,19 @@
     'contentWindow getter not native': !native(Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, 'contentWindow').get),
     'hidden getter not native (checked via window[1])': !/\[native code\]/.test(realm2.Function.prototype.toString.call(protoGet)),
   };
+  const vgetter = Object.getOwnPropertyDescriptor(Document.prototype, 'visibilityState').get;
+  Object.assign(tamper, {
+    'visibilityState getter not native': !native(vgetter),
+    'visibilityState getter wrong name': vgetter.name !== 'get visibilityState',
+    'visibilityState getter from another realm': Object.getPrototypeOf(vgetter) !== Function.prototype,
+    'visibilityState getter not native (checked via iframe)': !nativeViaIframe(vgetter),
+  });
+  // The script replaces these with fakes; confirm each still looks native and same-realm.
+  for (const name of ['setTimeout', 'setInterval', 'clearTimeout', 'clearInterval', 'requestAnimationFrame', 'cancelAnimationFrame']) {
+    const f = window[name];
+    tamper[name + ' not native'] = !native(f);
+    tamper[name + ' from another realm'] = Object.getPrototypeOf(f) !== Function.prototype;
+  }
   for (const [name, found] of Object.entries(tamper)) if (found) log('tampering visible: ' + name);
 
   // Background tabs pause animation frames and slow timers.
@@ -83,10 +105,29 @@
     lastTick = now;
   }, 100);
 
+  // Gaps: paths the script does not patch. These can fire while the script is active.
+  // The innerHTML-made frame keeps the real document.hidden, so it leaks true when backgrounded.
+  let prevIH = false;
+  setInterval(() => {
+    const h = realm3.document.hidden;
+    if (h && !prevIH) gap('innerHTML-created frame reports hidden=true (real visibility leaked)');
+    prevIH = h;
+  }, 500);
+  // requestIdleCallback is unpatched, so the browser still throttles it when the tab is hidden.
+  let lastIdle = performance.now();
+  const idleProbe = () => {
+    const n = performance.now();
+    if (n - lastIdle > 3000) gap('requestIdleCallback delayed ' + Math.round(n - lastIdle) + 'ms');
+    lastIdle = n;
+    requestIdleCallback(idleProbe);
+  };
+  if (window.requestIdleCallback) requestIdleCallback(idleProbe);
+
   setInterval(() => {
     document.getElementById('status').textContent =
       'hidden=' + document.hidden + '  visibilityState=' + document.visibilityState + '  hasFocus=' + document.hasFocus()
-      + '  | via iframe: hidden=' + iframeHidden() + '  hasFocus=' + iframeFocus();
+      + '  | via iframe: hidden=' + iframeHidden() + '  hasFocus=' + iframeFocus()
+      + '  | innerHTML frame (unpatched): hidden=' + realm3.document.hidden;
   }, 500);
 
   // Breakage checks: normal page behavior the script must not block.
@@ -121,6 +162,14 @@
     check('hidden is a boolean', typeof document.hidden === 'boolean');
     check('visibilityState is a string', typeof document.visibilityState === 'string');
     check('hasFocus returns a boolean', typeof document.hasFocus() === 'boolean');
+    const t0 = performance.now();
+    setTimeout(() => check('setTimeout fires (<200ms)', performance.now() - t0 < 200), 10);
+    const r0 = performance.now();
+    requestAnimationFrame(() => check('requestAnimationFrame fires (<200ms)', performance.now() - r0 < 200));
+    let tf = false; const tid = setTimeout(() => { tf = true; }, 10); clearTimeout(tid);
+    setTimeout(() => check('clearTimeout cancels', !tf), 80);
+    let rf = false; const rid = requestAnimationFrame(() => { rf = true; }); cancelAnimationFrame(rid);
+    setTimeout(() => check('cancelAnimationFrame cancels', !rf), 80);
   };
   document.getElementById('run').onclick = runChecks;
   runChecks();
