@@ -23,7 +23,7 @@ The fakes are installed on the prototypes with native names and a patched `Funct
 
 ## Install
 
-Needs a userscript manager (Tampermonkey, Violentmonkey, or similar). Open `always-visible.user.js` in the manager, or add it as a new script. It matches all URLs and runs at `document-start`.
+Needs a userscript manager (Tampermonkey, Violentmonkey, or similar). Open https://visibility.gjjb.de/always-visible.user.js and the manager offers to install it. The script's `@downloadURL` points there, so the manager picks up new versions by itself. It matches all URLs and runs at `document-start`.
 
 ## Testing
 
