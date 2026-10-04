@@ -6,9 +6,7 @@
 # beacons the page sends as GET /report?<msg> (see index.html):
 #
 #   1. Foreground (Firefox): every breakage check passes and nothing detects the
-#      script, except the documented worker-tick ceilings (~16ms timer
-#      resolution and the extra dispatcher stack frames). Suppression checks pass
-#      with the script and fail without it.
+#      script. Suppression checks pass with the script and fail without it.
 #   2. Backgrounded (Chromium, via cdp-background.js): with the tab genuinely
 #      hidden, the fakes hold -- no visibility/focus leak, no frame leak, no
 #      timer/rAF throttle. The no-script baseline must fire those detections, so
@@ -67,12 +65,9 @@ def msgs(path):
 
 with_m, base_m = msgs(sys.argv[1]), msgs(sys.argv[2])
 
-# Detections inherent to driving timers off a Worker; see the ponytail note in
-# always-visible.user.js. Everything else detecting the script is a failure.
-CEILING = re.compile(r'callback has \d+ frames|averages [\d.]+ms')
-
+# While the tab is visible, timers and rAF are native, so any detection is a failure.
 fails = [m for m in with_m if m.startswith('CHECK FAIL')]
-dets  = [m for m in with_m if m.startswith('DETECTED:') and not CEILING.search(m)]
+dets  = [m for m in with_m if m.startswith('DETECTED:')]
 passes = sum(m.startswith('CHECK PASS') for m in with_m)
 base_fails = [m for m in base_m if m.startswith('CHECK FAIL')]
 
@@ -97,7 +92,7 @@ if errs:
     print('FAIL (foreground)')
     for e in errs: print('  ' + e)
     sys.exit(1)
-print(f'PASS foreground ({passes} checks, {sw_total} suppressions, only documented ceilings detected)')
+print(f'PASS foreground ({passes} checks, {sw_total} suppressions, nothing detected)')
 PY
 
 # --- Pass 2: backgrounded, Chromium ---

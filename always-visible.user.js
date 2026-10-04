@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         Always visible
-// @version      11
+// @version      12
 // @match        *://*/*
 // @run-at       document-start
 // @grant        none
@@ -80,6 +80,9 @@ const patch = (win) => {
   fnProto.toString = disguise(win, toString, nativeToString);
 
   const docProto = win.Document.prototype;
+  // The real visibility, through the native getter (the patched one always says visible).
+  const nativeHiddenGet = Object.getOwnPropertyDescriptor(docProto, 'hidden').get;
+  const realHidden = () => nativeHiddenGet.call(win.document);
   // Call the native getter for its receiver check (then ignore the real value) so these throw on a
   // non-Document `this` exactly as the natives do.
   replaceGetter(win, docProto, 'hidden', (self, get) => { get.call(self); return false; });
@@ -163,7 +166,10 @@ const patch = (win) => {
     win.open = disguise(win, fake, nativeOpen);
   }
 
-  // Run rAF and timers off the background clock so a hidden tab shows no frame/timer pause.
+  // Keep rAF and timers running in a hidden tab. While the tab is really visible they go to the
+  // browser's own natives with the page's callback passed straight through, so their timing and
+  // call stack are native. While it is hidden (when the browser would pause or throttle them) the
+  // background clock drives them instead. Pending ones move across on every real visibilitychange.
   startHeartbeat();
   const now = () => win.performance.now();
   // Native Window methods throw on a wrong `this`; mirror that. `this` null/undefined is allowed
@@ -173,17 +179,29 @@ const patch = (win) => {
   // surfaces there as a native callback's would, without killing the dispatch loop.
   const rethrow = (e) => nativeSetTimeout(() => { throw e; });
 
-  const rafCbs = new Map();
+  const nRAF = win.requestAnimationFrame, nCAF = win.cancelAnimationFrame;
+  const rafCbs = new Map(); // id -> { cb, nat: native handles while on the native clock, else null }
   let rafSeq = 0;
-  const raf = { requestAnimationFrame(cb) { illegal(this); const id = ++rafSeq; rafCbs.set(id, cb); return id; } }.requestAnimationFrame;
-  const caf = { cancelAnimationFrame(id) { illegal(this); rafCbs.delete(id); } }.cancelAnimationFrame;
-  win.requestAnimationFrame = disguise(win, raf, win.requestAnimationFrame);
-  win.cancelAnimationFrame = disguise(win, caf, win.cancelAnimationFrame);
+  // The entry is dropped by a second native callback right after cb. Both run in the same frame,
+  // and no visibilitychange can land between them.
+  const rafNative = (id, x) => { x.nat = [nRAF.call(win, x.cb), nRAF.call(win, () => rafCbs.delete(id))]; };
+  const rafToClock = (x) => { for (const h of x.nat) nCAF.call(win, h); x.nat = null; };
+  const raf = { requestAnimationFrame(cb) {
+    illegal(this);
+    if (typeof cb !== 'function') nRAF.call(win, cb); // throws the native TypeError
+    const id = ++rafSeq, x = { cb, nat: null };
+    rafCbs.set(id, x);
+    if (!realHidden()) rafNative(id, x);
+    return id;
+  } }.requestAnimationFrame;
+  const caf = { cancelAnimationFrame(id) { illegal(this); const x = rafCbs.get(id); if (x?.nat) rafToClock(x); rafCbs.delete(id); } }.cancelAnimationFrame;
+  win.requestAnimationFrame = disguise(win, raf, nRAF);
+  win.cancelAnimationFrame = disguise(win, caf, nCAF);
   ticks.add(() => {
     if (!rafCbs.size) return;
-    const t = now(), due = [...rafCbs.values()];
-    rafCbs.clear();
-    for (const cb of due) { try { cb(t); } catch (e) { rethrow(e); } }
+    const t = now(), due = [...rafCbs].filter(([, x]) => !x.nat);
+    for (const [id] of due) rafCbs.delete(id);
+    for (const [, x] of due) { try { x.cb(t); } catch (e) { rethrow(e); } }
   });
 
   // requestIdleCallback is throttled/stopped in a hidden tab too, so drive it off the clock as well.
@@ -240,28 +258,43 @@ const patch = (win) => {
     });
   }
 
-  // ponytail: worker-driven dispatch has two tells with no cheap fix. (1) Resolution is the ~16ms
-  // worker tick, so setTimeout(fn,0)/short delays fire later and batch per tick. (2) Callbacks run
-  // from the worker's onmessage, so their stack carries our dispatcher frames, unlike a native
-  // callback's bare frame. Both are inherent to driving timers off a Worker; only a native timer
-  // (which the browser throttles when hidden, defeating the point) avoids them.
-  const timers = new Map();
+  // ponytail: while the tab is hidden, clock-driven dispatch keeps two tells. (1) Resolution is the
+  // ~16ms worker tick, so short delays fire later and batch per tick. (2) Callbacks run from the
+  // worker's onmessage, so their stack carries our dispatcher frames. Only a native timer avoids
+  // them, and the browser throttles those when hidden, defeating the point.
+  const nST = win.setTimeout, nSI = win.setInterval, nCT = win.clearTimeout;
+  const timers = new Map(); // id -> { cb, args, repeat, d, next, nat, start }
   let timerSeq = 0;
+  // A native setInterval runs the rest of an interval's repeats; `start` lets us find its next run.
+  const startInterval = (x, delay) => { x.start = now(); x.nat = [nSI.call(win, x.cb, delay, ...x.args)]; };
+  // One run on a native timer. The bookkeeping timer is queued first so it runs just before cb, in
+  // its own task: a one-shot is done, an interval moves on to a native setInterval. If the tab hides
+  // between the two, cb still fires once (throttled); it is never lost or doubled.
+  const timerNative = (id, x, wait) => {
+    x.start = null;
+    x.nat = [nST.call(win, () => (x.repeat ? startInterval(x, x.d) : timers.delete(id)), wait), nST.call(win, x.cb, wait, ...x.args)];
+  };
+  const timerToClock = (x) => {
+    for (const h of x.nat) nCT.call(win, h);
+    if (x.start != null) { const p = Math.max(x.d, 1); x.next = x.start + p * Math.ceil((now() - x.start) / p); }
+    x.nat = x.start = null;
+  };
   const addTimer = (cb, delay, args, repeat) => {
-    // A string handler runs in global scope, like a native string timer (CSP can block both).
-    if (typeof cb === 'string') { const code = cb; cb = () => win.eval(code); }
-    if (typeof cb !== 'function') return 0;
-    const d = Math.max(+delay || 0, 0), id = ++timerSeq;
-    timers.set(id, { cb, args, repeat, d, next: now() + d });
+    if (typeof cb !== 'function' && typeof cb !== 'string') return 0;
+    const d = Math.max(+delay || 0, 0), id = ++timerSeq, x = { cb, args, repeat, d, next: now() + d, nat: null, start: null };
+    timers.set(id, x);
+    // The page's own delay value goes to the native, so it is coerced and clamped natively.
+    if (!realHidden()) { if (repeat) startInterval(x, delay); else timerNative(id, x, delay); }
     return id;
   };
+  const clear = (id) => { const x = timers.get(id); if (x?.nat) timerToClock(x); timers.delete(id); };
   const setT = { setTimeout(cb, delay, ...a) { illegal(this); return addTimer(cb, delay, a, false); } }.setTimeout;
   const setI = { setInterval(cb, delay, ...a) { illegal(this); return addTimer(cb, delay, a, true); } }.setInterval;
-  const clrT = { clearTimeout(id) { illegal(this); timers.delete(id); } }.clearTimeout;
-  const clrI = { clearInterval(id) { illegal(this); timers.delete(id); } }.clearInterval;
-  win.setTimeout = disguise(win, setT, win.setTimeout);
-  win.setInterval = disguise(win, setI, win.setInterval);
-  win.clearTimeout = disguise(win, clrT, win.clearTimeout);
+  const clrT = { clearTimeout(id) { illegal(this); clear(id); } }.clearTimeout;
+  const clrI = { clearInterval(id) { illegal(this); clear(id); } }.clearInterval;
+  win.setTimeout = disguise(win, setT, nST);
+  win.setInterval = disguise(win, setI, nSI);
+  win.clearTimeout = disguise(win, clrT, nCT);
   win.clearInterval = disguise(win, clrI, win.clearInterval);
   ticks.add(() => {
     const t = now();
@@ -269,14 +302,23 @@ const patch = (win) => {
     // beats a longer one queued earlier. Interval repeats advance from the target time, not the
     // actual fire time, so they don't drift later by up to a tick each round.
     const due = [];
-    for (const [id, x] of timers) if (t >= x.next) due.push([id, x]);
+    for (const [id, x] of timers) if (!x.nat && t >= x.next) due.push([id, x]);
     due.sort((a, b) => a[1].next - b[1].next || a[0] - b[0]);
     for (const [id, x] of due) {
       if (!timers.has(id)) continue; // a callback earlier this tick cleared it
       if (x.repeat) { x.next += x.d; if (x.next <= t) x.next = t + x.d; } else timers.delete(id);
-      try { x.cb(...x.args); } catch (e) { rethrow(e); }
+      // A string handler runs in global scope, like a native string timer (CSP can block both).
+      try { typeof x.cb === 'string' ? win.eval(x.cb) : x.cb(...x.args); } catch (e) { rethrow(e); }
     }
   });
+
+  // Move pending rAF callbacks and timers to the clock when the tab really hides, and back to the
+  // natives when it shows. Registered before the visibilitychange blocker below, so it still runs.
+  win.addEventListener('visibilitychange', () => {
+    const hidden = realHidden();
+    for (const [id, x] of rafCbs) if (hidden && x.nat) rafToClock(x); else if (!hidden && !x.nat) rafNative(id, x);
+    for (const [id, x] of timers) if (hidden && x.nat) timerToClock(x); else if (!hidden && !x.nat) timerNative(id, x, x.next - now());
+  }, true);
 
   const block = e => e.stopImmediatePropagation();
 
