@@ -27,7 +27,7 @@ Needs a userscript manager (Tampermonkey, Violentmonkey, or similar). Open `alwa
 
 ## Testing
 
-`index.html` is a test page. Open it, keep it focused, and click **Run again** to confirm normal page behavior still works (hover, focus/blur, keyboard, input events). Then switch to another tab or window: with the script active, the **Detections** list should stay empty — no visibility change, no focus loss, no paused frames, no visible tampering.
+`index.html` is a test page. Open it, keep it focused, and click **Run again** to confirm normal page behavior still works (hover, focus/blur, keyboard, input events). Then switch to another tab or window: with the script active, the **Detections** list should show only the worker-tick limits listed above (setTimeout averaging ~16 ms, extra frames on setTimeout/requestAnimationFrame stacks) — no visibility change, no focus loss, no paused frames, no other tampering.
 
 `./run-tests.sh` runs the checks automatically in two passes:
 
