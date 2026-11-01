@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Always visible
-// @version      13
-// @downloadURL  https://visibility.gjjb.de/always-visible.user.js
+// @version      14
+// @downloadURL  https://v.3500000.xyz/always-visible.user.js
 // @match        *://*/*
 // @run-at       document-start
 // @grant        none
